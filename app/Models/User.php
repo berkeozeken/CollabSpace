@@ -2,47 +2,62 @@
 
 namespace App\Models;
 
-// use Illuminate\Contracts\Auth\MustVerifyEmail;
+use App\Enums\TeamRole;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Laravel\Sanctum\HasApiTokens;
 
 class User extends Authenticatable
 {
-    /** @use HasFactory<\Database\Factories\UserFactory> */
-    use HasFactory, Notifiable;
+    use HasApiTokens, HasFactory, Notifiable;
 
-    /**
-     * The attributes that are mass assignable.
-     *
-     * @var list<string>
-     */
+    /** @var array<int, string> */
     protected $fillable = [
         'name',
         'email',
         'password',
+        'is_admin',
     ];
 
-    /**
-     * The attributes that should be hidden for serialization.
-     *
-     * @var list<string>
-     */
-    protected $hidden = [
-        'password',
-        'remember_token',
+    /** @var array<string, string> */
+    protected $casts = [
+        'email_verified_at' => 'datetime',
+        'is_admin' => 'boolean',
+        'password' => 'hashed',
     ];
 
-    /**
-     * Get the attributes that should be cast.
-     *
-     * @return array<string, string>
-     */
-    protected function casts(): array
+    public function teams(): BelongsToMany
     {
-        return [
-            'email_verified_at' => 'datetime',
-            'password' => 'hashed',
-        ];
+        return $this->belongsToMany(Team::class)
+            ->withPivot('role')
+            ->withTimestamps();
+    }
+
+    public function ownedTeams()
+    {
+        return $this->hasMany(Team::class, 'owner_id');
+    }
+
+    public function teamRole(Team $team): ?TeamRole
+    {
+        $pivot = $this->teams()->where('team_id', $team->id)->first()?->pivot;
+        return $pivot ? TeamRole::from($pivot->role) : null;
+    }
+
+    public function isOwnerOf(Team $team): bool
+    {
+        return $team->owner_id === $this->id;
+    }
+
+    public function isManagerOf(Team $team): bool
+    {
+        return $this->teamRole($team) === TeamRole::MANAGER;
+    }
+
+    public function isMemberOf(Team $team): bool
+    {
+        return $this->teamRole($team) === TeamRole::MEMBER;
     }
 }
