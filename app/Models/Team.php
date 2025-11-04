@@ -17,15 +17,26 @@ class Team extends Model
         'owner_id',
     ];
 
-    protected $casts = [
-        // none
-    ];
+    /**
+     * Boot model events.
+     * - Newly created team gets its owner auto-attached as OWNER (pivot).
+     */
+    protected static function booted()
+    {
+        static::created(function (Team $team) {
+            if (! $team->users()->where('users.id', $team->owner_id)->exists()) {
+                $team->users()->attach($team->owner_id, ['role' => TeamRole::OWNER->value]);
+            }
+        });
+    }
 
+    /** Owner relationship */
     public function owner(): BelongsTo
     {
         return $this->belongsTo(User::class, 'owner_id');
     }
 
+    /** All users of team (with pivot role + timestamps) */
     public function users(): BelongsToMany
     {
         return $this->belongsToMany(User::class)
@@ -33,24 +44,34 @@ class Team extends Model
             ->withTimestamps();
     }
 
+    /** Only members */
     public function members(): BelongsToMany
     {
         return $this->users()->wherePivot('role', TeamRole::MEMBER->value);
     }
 
+    /** Only managers */
     public function managers(): BelongsToMany
     {
         return $this->users()->wherePivot('role', TeamRole::MANAGER->value);
     }
 
+    /** Check if user belongs to team */
     public function hasUser(User $user): bool
     {
         return $this->users()->where('users.id', $user->id)->exists();
     }
 
+    /** Get specific user's role */
     public function roleOf(User $user): ?TeamRole
     {
         $pivot = $this->users()->where('users.id', $user->id)->first()?->pivot;
         return $pivot ? TeamRole::from($pivot->role) : null;
+    }
+
+    /** Check if user is the team owner */
+    public function isOwner(User $user): bool
+    {
+        return $this->owner_id === $user->id;
     }
 }
