@@ -3,6 +3,7 @@
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\TeamController;
 use App\Http\Controllers\TeamMemberController;
+use App\Http\Controllers\MessageController;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 
@@ -27,6 +28,17 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('/teams/{team}/members',              [TeamMemberController::class, 'store'])->name('teams.members.store');
     Route::delete('/teams/{team}/members/{user}',     [TeamMemberController::class, 'destroy'])->name('teams.members.destroy');
     Route::patch('/teams/{team}/members/{user}/role', [TeamMemberController::class, 'updateRole'])->name('teams.members.role');
+
+    // ==== Team Chat ====
+    Route::get('/teams/{team}/chat', [MessageController::class, 'chat'])->name('teams.chat');
+    Route::get('/teams/{team}/messages', [MessageController::class, 'index'])->name('teams.messages.index');
+    Route::post('/teams/{team}/messages', [MessageController::class, 'store'])->name('teams.messages.store');
+
+    // (opsiyonel ama Sprint 3 tamam olsun diye ekli)
+    Route::patch('/teams/{team}/messages/{message}', [MessageController::class, 'update'])->name('teams.messages.update');
+    Route::delete('/teams/{team}/messages/{message}', [MessageController::class, 'destroy'])->name('teams.messages.destroy');
+    Route::post('/teams/{team}/messages/mark-read', [MessageController::class, 'markRead'])->name('teams.messages.markRead');
+    Route::post('/teams/{team}/typing', [MessageController::class, 'typing'])->name('teams.typing');
 });
 
 // Profile
@@ -36,10 +48,4 @@ Route::middleware('auth')->group(function () {
     Route::delete('/profile',[ProfileController::class, 'destroy'])->name('profile.destroy');
 });
 
-/*
-|--------------------------------------------------------------------------
-| Auth routes (Breeze)
-|--------------------------------------------------------------------------
-| BUNU KESİNLİKLE EKLE: login/register/verify + LOGOUT burada!
-*/
 require __DIR__.'/auth.php';

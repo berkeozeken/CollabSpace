@@ -168,7 +168,19 @@ function confirmDeleteTeam() {
           Owner: <span class="font-medium">{{ team.owner.name }}</span> ({{ team.owner.email }})
         </p>
       </div>
-      <Link :href="route('teams.index')" class="text-indigo-600 hover:underline text-sm">← Back to Teams</Link>
+
+      <!-- Header actions: Back + Chat -->
+      <div class="flex items-center gap-3">
+        <Link :href="route('teams.index')" class="text-indigo-600 hover:underline text-sm">
+          ← Back to Teams
+        </Link>
+        <Link
+          :href="route('teams.chat', { team: team.id })"
+          class="inline-flex items-center rounded-xl bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
+        >
+          Open Chat
+        </Link>
+      </div>
     </div>
 
     <!-- Rename -->
