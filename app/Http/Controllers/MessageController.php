@@ -13,6 +13,7 @@ use App\Models\MessageRead;
 use App\Models\Team;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\RateLimiter;
 use Inertia\Inertia;
 
@@ -30,12 +31,6 @@ class MessageController extends Controller
         ]);
     }
 
-    /**
-     * Cursor-based fetch:
-     * - initial:                GET ?per_page=30          -> son 30 mesaj
-     * - load older (infinite):  GET ?before_id={oldestId} -> o id'den daha eski 30
-     * Dönen sıralama: kronolojik (asc) — ekrana direkt yaz.
-     */
     public function index(Request $request, Team $team)
     {
         $this->authorizeTeamMember($team);
@@ -43,6 +38,7 @@ class MessageController extends Controller
         $perPage  = (int) $request->integer('per_page', 30);
         $perPage  = max(10, min($perPage, 100));
         $beforeId = (int) $request->integer('before_id', 0);
+        $meId     = (int) $request->user()->id;
 
         $base = Message::with(['user:id,name'])
             ->where('team_id', $team->id);
@@ -51,19 +47,23 @@ class MessageController extends Controller
             $base->where('id', '<', $beforeId);
         }
 
-        // Son mesajlardan geriye doğru çekiyoruz
         $chunk = (clone $base)
             ->orderBy('id', 'desc')
             ->limit($perPage)
             ->get();
 
-        // Ekranda kronolojik görmek için ters çevir
         $items = $chunk->reverse()->values();
+        $ids   = $items->pluck('id')->all();
 
-        // Bir sonraki "before_id": şu an dönen en eski id
+        $reactions = $this->reactionsForMessages($ids, $meId);
+
+        // append reactions
+        foreach ($items as $m) {
+            $m->reactions = $reactions[$m->id] ?? [];
+        }
+
         $nextBeforeId = $items->first()->id ?? null;
 
-        // Daha eski var mı?
         $hasMore = false;
         if ($nextBeforeId) {
             $hasMore = Message::where('team_id', $team->id)
@@ -82,12 +82,10 @@ class MessageController extends Controller
     {
         $this->authorizeTeamMember($team);
 
-        // basit throttle: user+team başına 5/sn
         $key = "msg:{$team->id}:".$request->user()->id;
         if (RateLimiter::tooManyAttempts($key, 5)) {
             return response()->json(['message' => 'Too many messages, slow down.'], 429);
         }
-        // ikinci argüman decay seconds
         RateLimiter::hit($key, 1);
 
         $validated = $request->validate([
@@ -101,6 +99,7 @@ class MessageController extends Controller
         ]);
 
         $message->load('user:id,name');
+        $message->reactions = []; // yeni mesajda boş
 
         MessageCreated::dispatch($message);
 
@@ -199,5 +198,42 @@ class MessageController extends Controller
 
         $isMember = $team->users()->where('users.id', $userId)->exists();
         if (!$isMember) abort(403, 'You are not a member of this team.');
+    }
+
+    /**
+     * @return array<int, array<int,array{emoji:string,count:int,me:bool,users:array}>>
+     */
+    private function reactionsForMessages(array $messageIds, int $meId): array
+    {
+        if (empty($messageIds)) return [];
+
+        $rows = DB::table('message_reactions as mr')
+            ->join('users as u', 'u.id', '=', 'mr.user_id')
+            ->whereIn('mr.message_id', $messageIds)
+            ->select('mr.message_id','mr.emoji','mr.user_id','u.name')
+            ->orderBy('mr.message_id')
+            ->orderBy('mr.emoji')
+            ->orderBy('u.name')
+            ->get();
+
+        $out = [];
+        foreach ($rows as $r) {
+            $mid = (int) $r->message_id;
+            $out[$mid] = $out[$mid] ?? [];
+            $key = null;
+            // aynı message+emoji için slot bul
+            foreach ($out[$mid] as $i => $slot) {
+                if ($slot['emoji'] === $r->emoji) { $key = $i; break; }
+            }
+            if ($key === null) {
+                $out[$mid][] = ['emoji' => $r->emoji, 'count' => 0, 'me' => false, 'users' => []];
+                $key = array_key_last($out[$mid]);
+            }
+            $out[$mid][$key]['count']++;
+            $out[$mid][$key]['me'] = $out[$mid][$key]['me'] || ((int)$r->user_id === $meId);
+            $out[$mid][$key]['users'][] = ((int)$r->user_id === $meId) ? 'You' : $r->name;
+        }
+
+        return $out;
     }
 }

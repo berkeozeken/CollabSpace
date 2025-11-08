@@ -1,11 +1,9 @@
 <script setup>
 import { onMounted, onBeforeUnmount, reactive, ref, nextTick, computed, watch } from 'vue'
 import { Link, usePage } from '@inertiajs/vue3'
+import MessageItem from '@/Components/Chat/MessageItem.vue'
 
-const props = defineProps({
-  team: { type: Object, required: true }, // { id, name }
-})
-
+const props = defineProps({ team: { type: Object, required: true } })
 const page = usePage()
 const me = page?.props?.auth?.user || { id: null, name: '' }
 
@@ -13,14 +11,15 @@ const state = reactive({
   loading: true,
   sending: false,
   hasMore: true,
-  nextBeforeId: null,     // server'dan cursor
-  typingUsers: {},        // { [userId]: userName } (self hariç tutulacak)
+  nextBeforeId: null,
+  typingUsers: {}, // { [userId]: name }
 })
 
-const messages = ref([])  // { id, user:{id,name}, body, created_at }
+const messages = ref([]) // [{ id, user:{id,name}, body, created_at, reactions?: [{emoji,count,me,users[]}] }]
 const body = ref('')
 const scroller = ref(null)
 let typingActive = false
+let markReadDebounce = null
 
 function scrollToBottom (smooth = false) {
   nextTick(() => {
@@ -35,20 +34,25 @@ function formatTime (iso) {
 }
 const isBlank = v => !v || !v.trim()
 
-// ---- tiny helper: duplicate guard
-function hasMessage(id) {
+function hasMessage (id) {
   return messages.value.some(m => m.id === id)
 }
-function pushMessage(m, smooth = false) {
+function normalizeMessage (m) {
+  if (!Array.isArray(m.reactions)) m.reactions = []
+  if (!m.user) m.user = { id: 0, name: 'User' }
+  return m
+}
+function pushMessage (m, smooth = false) {
   if (!m || hasMessage(m.id)) return
+  normalizeMessage(m)
   messages.value.push(m)
   const el = scroller.value
   const nearBottom = el && (el.scrollHeight - el.scrollTop - el.clientHeight) < 120
   if (nearBottom) scrollToBottom(smooth)
 }
 
-// ---------- API (cursor-based)
-async function fetchMessages(initial = false) {
+// ===== API (cursor-based) =====
+async function fetchMessages (initial = false) {
   if (!state.hasMore && !initial) return
   try {
     const params = { per_page: 30 }
@@ -58,21 +62,19 @@ async function fetchMessages(initial = false) {
       route('teams.messages.index', { team: props.team.id }),
       { params }
     )
+    const items = (data?.data ?? []).map(normalizeMessage)
 
-    const items = data?.data ?? []
     if (initial) {
       messages.value = items
       scrollToBottom()
+      queueMarkReadVisible()
     } else {
-      // daha eski mesajları ÜSTE ekle (chronologic list)
       messages.value = [...items, ...messages.value]
     }
 
-    state.hasMore      = !!data?.has_more
+    state.hasMore = !!data?.has_more
     state.nextBeforeId = data?.next_before_id || null
-  } finally {
-    state.loading = false
-  }
+  } finally { state.loading = false }
 }
 
 async function sendMessage () {
@@ -85,19 +87,18 @@ async function sendMessage () {
       { body: text }
     )
     if (data?.message) {
-      pushMessage(data.message, true) // duplicate guard
+      pushMessage(data.message, true)
+      queueMarkReadVisible()
     }
     body.value = ''
-    stopTypingIfNeeded() // send sonrası typing’i kesin
-  } catch (e) {
-    console.error('sendMessage failed', e?.response?.data || e)
+    stopTypingIfNeeded()
   } finally {
     state.sending = false
   }
 }
 
-// ---- typing outbox
-function sendTyping(stateVal) {
+// ===== typing outbox =====
+function sendTyping (stateVal) {
   window.axios.post(route('teams.typing', { team: props.team.id }), { state: stateVal }).catch(() => {})
 }
 function startTypingIfNeeded () {
@@ -112,12 +113,9 @@ function stopTypingIfNeeded () {
     typingActive = false
   }
 }
-watch(body, (val) => {
-  if (isBlank(val)) stopTypingIfNeeded()
-  else startTypingIfNeeded()
-})
+watch(body, (val) => { if (isBlank(val)) stopTypingIfNeeded(); else startTypingIfNeeded() })
 
-// ---- typing indicator metni (self hariç)
+// typing indicator (self hariç)
 const typingText = computed(() => {
   const others = Object.entries(state.typingUsers)
     .filter(([uid]) => String(uid) !== String(me.id))
@@ -128,20 +126,53 @@ const typingText = computed(() => {
   return `${others.slice(0, 2).join(', ')} and others are typing...`
 })
 
-// ---- realtime (Echo)
+// ===== realtime (Echo) =====
 let channel = null
 function subscribe () {
   if (!window?.Echo) return
   unsubscribe()
   channel = window.Echo.private(`team.${props.team.id}`)
     .listen('.MessageCreated', (e) => {
-      // e = { id, team_id, user:{id,name}, body, created_at }
       pushMessage(e, true)
-      // mesaj gelince gönderenin typing’i sil
       if (e?.user?.id) delete state.typingUsers[e.user.id]
+      queueMarkReadVisible()
+    })
+    .listen('.MessageUpdated', (e) => {
+      const i = messages.value.findIndex(m => m.id === e.id)
+      if (i !== -1) {
+        messages.value[i].body = e.body
+        messages.value[i].updated_at = e.updated_at
+        messages.value[i].edited = true
+      }
+    })
+    .listen('.MessageDeleted', (e) => {
+      const i = messages.value.findIndex(m => m.id === e.id)
+      if (i !== -1) messages.value[i].deleted = true
+    })
+    .listen('.ReactionToggled', (e) => {
+      // e = { message_id, user_id, emoji, direction, count, users, user_ids }
+      const msg = messages.value.find(m => m.id === e.message_id)
+      if (!msg) return
+
+      let entry = msg.reactions.find(r => r.emoji === e.emoji)
+      if (!entry) {
+        entry = { emoji: e.emoji, count: 0, me: false, users: [] }
+        msg.reactions.push(entry)
+      }
+
+      entry.count = e.count
+
+      const ids = Array.isArray(e.user_ids) ? e.user_ids : []
+      const names = Array.isArray(e.users) ? e.users : []
+      // yerelleştir: benim id'm eşitse "You"
+      entry.users = names.map((n, i) => String(ids[i]) === String(me.id) ? 'You' : n)
+      entry.me = ids.some(uid => String(uid) === String(me.id))
+
+      if (entry.count === 0) {
+        msg.reactions = msg.reactions.filter(r => r.emoji !== e.emoji)
+      }
     })
     .listen('.TypingStarted', (e) => {
-      // e = { team_id, user_id, user_name }
       if (String(e.user_id) === String(me.id)) return
       state.typingUsers[e.user_id] = e.user_name || `User #${e.user_id}`
     })
@@ -155,19 +186,77 @@ function unsubscribe () {
   channel = null
 }
 
-// ---- infinite scroll (yukarı -> eski)
+// infinite scroll (yukarı -> eski)
 function onScroll (e) {
   const el = e.target
   if (el.scrollTop < 40 && !state.loading && state.hasMore) {
     const prev = el.scrollHeight
     fetchMessages(false).then(() => {
-      nextTick(() => el.scrollTop = el.scrollHeight - prev)
+      nextTick(() => { el.scrollTop = el.scrollHeight - prev })
     })
+  }
+  queueMarkReadVisible()
+}
+
+// okundu işaretleme (debounce)
+function queueMarkReadVisible () {
+  clearTimeout(markReadDebounce)
+  markReadDebounce = setTimeout(markReadVisible, 250)
+}
+function markReadVisible () {
+  if (messages.value.length === 0) return
+  const lastIds = messages.value.slice(-30).map(m => m.id)
+  if (lastIds.length) {
+    window.axios.post(
+      route('teams.messages.markRead', { team: props.team.id }),
+      { message_ids: lastIds }
+    ).catch(() => {})
+  }
+}
+
+// actions
+async function editMessage (id, bodyNew) {
+  try {
+    await window.axios.patch(route('teams.messages.update', { team: props.team.id, message: id }), { body: bodyNew })
+    const m = messages.value.find(x => x.id === id)
+    if (m) { m.body = bodyNew; m.edited = true }
+  } catch {}
+}
+async function deleteMessage (id) {
+  try {
+    await window.axios.delete(route('teams.messages.destroy', { team: props.team.id, message: id }))
+    const m = messages.value.find(x => x.id === id)
+    if (m) m.deleted = true
+  } catch {}
+}
+async function toggleReaction (id, emoji) {
+  try {
+    const { data } = await window.axios.post(
+      route('teams.messages.reactions.toggle', { team: props.team.id, message: id }),
+      { emoji }
+    )
+    const m = messages.value.find(x => x.id === id); if (!m) return
+    let entry = m.reactions.find(r => r.emoji === data.emoji)
+    if (!entry) {
+      entry = { emoji: data.emoji, count: 0, me: false, users: [] }
+      m.reactions.push(entry)
+    }
+    entry.count = data.count
+
+    const ids = Array.isArray(data.user_ids) ? data.user_ids : []
+    const names = Array.isArray(data.users) ? data.users : []
+    entry.users = names.map((n, i) => String(ids[i]) === String(me.id) ? 'You' : n)
+    entry.me = ids.some(uid => String(uid) === String(me.id))
+
+    if (entry.count === 0) {
+      m.reactions = m.reactions.filter(r => r.emoji !== data.emoji)
+    }
+  } catch (e) {
+    console.error('toggleReaction failed', e?.response?.data || e)
   }
 }
 
 onMounted(async () => {
-  // İlk açılışta SON 30’u getir
   state.nextBeforeId = null
   await fetchMessages(true)
   subscribe()
@@ -200,20 +289,16 @@ onBeforeUnmount(() => {
           Loading messages…
         </div>
 
-        <div v-for="m in messages" :key="m.id" class="flex items-start gap-3">
-          <div class="h-8 w-8 flex items-center justify-center rounded-full bg-indigo-600 text-white text-sm">
-            {{ (m.user?.name || '?').slice(0,1).toUpperCase() }}
-          </div>
-          <div class="flex-1">
-            <div class="flex items-center gap-2">
-              <span class="font-medium text-gray-900">{{ m.user?.name || 'User' }}</span>
-              <span class="text-xs text-gray-400">{{ formatTime(m.created_at) }}</span>
-            </div>
-            <div class="whitespace-pre-wrap text-gray-800">
-              {{ m.body }}
-            </div>
-          </div>
-        </div>
+        <MessageItem
+          v-for="m in messages"
+          :key="m.id"
+          :me-id="me.id"
+          :message="m"
+          :format-time="formatTime"
+          @edit="({ id, body }) => editMessage(id, body)"
+          @delete="({ id }) => deleteMessage(id)"
+          @react="({ id, emoji }) => toggleReaction(id, emoji)"
+        />
       </div>
 
       <div v-if="typingText" class="px-4 py-1 text-xs text-gray-500 italic border-t bg-gray-50">

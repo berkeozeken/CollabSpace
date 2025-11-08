@@ -10,6 +10,7 @@ class AuthServiceProvider extends ServiceProvider
 {
     protected $policies = [
         Team::class => TeamPolicy::class,
+        \App\Models\Message::class => \App\Policies\MessagePolicy::class,
     ];
 
     public function boot(): void

@@ -37,4 +37,10 @@ class Message extends Model
     {
         return $this->hasMany(MessageRead::class);
     }
+
+    // emoji tepkileri
+    public function reactions()
+    {
+        return $this->hasMany(MessageReaction::class);
+    }
 }
