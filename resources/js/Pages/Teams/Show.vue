@@ -41,25 +41,28 @@ function roleBadge(role) {
   return 'bg-gray-100 text-gray-800'
 }
 
-// Invite / Rename / Transfer
+// Invite → pending
 const inviteEmail = ref('')
 function invite() {
   if (!inviteEmail.value) return
-  window.axios.post(route('teams.members.store', props.team.id), { email: inviteEmail.value })
-    .then(res => {
-      const added = res?.data?.user
-      if (added && !members.value.some(x => x.id === added.id)) {
-        members.value.push({ ...added, role: added.role ?? 'member', is_owner: false })
-      }
-      inviteEmail.value = ''
-    })
+  window.axios.post(route('teams.invitations.store', props.team.id), { email: inviteEmail.value })
+    .then(() => { inviteEmail.value = '' })
+    .catch(err => console.error('invite failed', err?.response?.data || err))
 }
 
+// Rename (busy guard)
 const teamName = ref(props.team.name)
-function updateName() {
-  window.axios.patch(route('teams.update', props.team.id), { name: teamName.value })
+async function updateName() {
+  if (!teamName.value || state.busy.__rename) return
+  state.busy.__rename = true
+  try {
+    await window.axios.patch(route('teams.update', props.team.id), { name: teamName.value })
+  } finally {
+    state.busy.__rename = false
+  }
 }
 
+// Transfer ownership
 const newOwnerId = ref('')
 function transferOwnership() {
   if (!newOwnerId.value) return
@@ -103,10 +106,10 @@ function removeMember(member) {
   })
 }
 
-// Promote/Demote (optimistic) — küçük harf gönderiyoruz (manager/member)
+// Promote/Demote (optimistic)
 function toggleRole(member) {
   if (member.is_owner) return
-  const currentUpper = upper(member.role)      // ekrana göre
+  const currentUpper = upper(member.role)
   const newRoleLower = (currentUpper === 'MANAGER') ? 'member' : 'manager'
   const actionText   = (newRoleLower === 'manager') ? 'Promote to Manager' : 'Demote to Member'
 
@@ -117,19 +120,14 @@ function toggleRole(member) {
     onOk: () => {
       state.busy[member.id] = true
       const prev = member.role
-      // optimistic update
       member.role = newRoleLower
 
       const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
 
-      // POST + method spoof → 422/CSRF sorunlarını by-pass
       window.axios.post(
         route('teams.members.role', { team: props.team.id, user: member.id }),
         { role: newRoleLower, _method: 'PATCH', _token: csrf }
       )
-      .then(() => {
-        // success -> optimistic zaten uygulandı
-      })
       .catch((err) => {
         member.role = prev
         console.error('Role change failed', err?.response?.data || err)
@@ -169,7 +167,6 @@ function confirmDeleteTeam() {
         </p>
       </div>
 
-      <!-- Header actions: Back + Chat -->
       <div class="flex items-center gap-3">
         <Link :href="route('teams.index')" class="text-indigo-600 hover:underline text-sm">
           ← Back to Teams
@@ -180,15 +177,27 @@ function confirmDeleteTeam() {
         >
           Open Chat
         </Link>
+        <Link
+          :href="route('teams.tasks.board', { team: team.id })"
+          class="inline-flex items-center rounded-xl bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700"
+        >
+          Open Tasks
+        </Link>
       </div>
     </div>
 
     <!-- Rename -->
-    <div v-if="canUpdate" class="rounded-lg border bg-white p-4">
+    <div v-if="canUpdate" class="rounded-lg border bg-white p-4 relative">
       <h2 class="mb-2 font-semibold">Rename Team</h2>
       <form @submit.prevent="updateName" class="flex gap-2">
         <input v-model="teamName" class="w-full rounded border px-3 py-2" placeholder="Team name">
-        <button class="rounded bg-gray-800 px-4 py-2 text-white">Save</button>
+        <button
+          type="submit"
+          :disabled="state.busy.__rename"
+          class="z-10 rounded bg-gray-800 px-4 py-2 text-white disabled:opacity-50"
+        >
+          {{ state.busy.__rename ? 'Saving…' : 'Save' }}
+        </button>
       </form>
     </div>
 
@@ -199,6 +208,9 @@ function confirmDeleteTeam() {
         <input v-model="inviteEmail" type="email" class="w-full rounded border px-3 py-2" placeholder="user@example.com">
         <button :disabled="!inviteEmail" class="rounded bg-indigo-600 px-4 py-2 text-white disabled:opacity-50">Invite</button>
       </form>
+      <p class="mt-2 text-xs text-gray-500">
+        Pending invitation will be created — user must accept it.
+      </p>
     </div>
 
     <!-- Transfer Ownership -->

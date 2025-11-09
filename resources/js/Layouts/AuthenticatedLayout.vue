@@ -43,6 +43,14 @@ const showingNavigationDropdown = ref(false)
                 >
                   Teams
                 </NavLink>
+
+                <!-- Invitations -->
+                <NavLink
+                  :href="route('invitations.index')"
+                  :active="route().current('invitations.index')"
+                >
+                  Invitations
+                </NavLink>
               </div>
             </div>
 
@@ -99,6 +107,14 @@ const showingNavigationDropdown = ref(false)
               :active="route().current('teams.index') || route().current('teams.show')"
             >
               Teams
+            </ResponsiveNavLink>
+
+            <!-- Invitations (responsive) -->
+            <ResponsiveNavLink
+              :href="route('invitations.index')"
+              :active="route().current('invitations.index')"
+            >
+              Invitations
             </ResponsiveNavLink>
           </div>
 
